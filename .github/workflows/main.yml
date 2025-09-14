@@ -1,0 +1,303 @@
+name: RDP with Fixed Premium Credentials
+on: 
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'  # إعادة تشغيل يومي الساعة 4 صباحاً
+
+jobs:
+  premium-rdp-setup:
+    runs-on: windows-latest
+    timeout-minutes: 259200
+
+    steps:
+    - name: Configure Premium RDP Settings
+      run: |
+        # تمكين RDP مع إعدادات متقدمة
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+        
+        # تحسين إعدادات الأداء وجودة الاتصال
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fSingleSessionPerUser" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxInstanceCount" -Value 2 -Force
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxMonitors" -Value 4 -Force
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxXResolution" -Value 3840 -Force
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxYResolution" -Value 2160 -Force
+        
+        # تحسين تجربة الوسائط المتعددة
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "AVC444ModePreferred" -Value 1 -Force
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "AVCHardwareEncodePreferred" -Value 1 -Force
+        
+        # فتح منفذ RDP في الجدار الناري
+        netsh advfirewall firewall add rule name="RDP Premium" dir=in action=allow protocol=TCP localport=3389 profile=any enable=yes
+        
+        # إعادة تشغيل الخدمة
+        Restart-Service -Name TermService -Force
+        Start-Sleep -Seconds 5
+        Write-Host "✅ تم تكوين إعدادات RDP المتقدمة"
+
+    - name: Create Premium User Account
+      run: |
+        $username = "abdalli"
+        $password = "abdalli@100"
+        
+        # إنشاء أو تحديث المستخدم
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+        
+        if (-not $userExists) {
+          # إنشاء مستخدم جديد
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "Premium RDP User"
+          Write-Host "✅ تم إنشاء المستخدم: $username"
+        } else {
+          # تحديث كلمة المرور للمستخدم الموجود
+          Set-LocalUser -Name $username -Password $securePass -PasswordNeverExpires $true
+          Write-Host "✅ تم تحديث كلمة المرور للمستخدم: $username"
+        }
+        
+        # التأكد من أن المستخدم في المجموعات المطلوبة
+        Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+        
+        # تمكين المستخدم إذا كان معطلاً
+        Enable-LocalUser -Name $username
+        
+        echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+        echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        
+        Write-Host "✅ بيانات الاعتماد الثابتة جاهزة: $username / $password"
+
+    - name: Install System Enhancements
+      run: |
+        # تثبيت Chocolatey أولاً إذا لم يكن مثبتاً
+        if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        }
+        
+        # تثبيت متصفح Chrome لاختبار الويب
+        $chromeUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
+        $chromePath = "$env:TEMP\chrome_installer.exe"
+        Invoke-WebRequest -Uri $chromeUrl -OutFile $chromePath
+        Start-Process -FilePath $chromePath -ArgumentList "/silent", "/install" -Wait
+        Remove-Item $chromePath -Force
+        
+        # تثبيت أدوات تطوير إضافية
+        choco install vscode -y --no-progress
+        choco install git -y --no-progress
+        choco install nodejs -y --no-progress
+        
+        Write-Host "✅ تم تثبيت التحسينات الإضافية"
+
+    - name: Customize Desktop Experience
+      run: |
+        # تغيير خلفية سطح المكتب
+        $wallpaperUrl = "https://raw.githubusercontent.com/sys9k/winwall/main/win11.jpg"
+        $wallpaperPath = "$env:TEMP\wallpaper.jpg"
+        try {
+          Invoke-WebRequest -Uri $wallpaperUrl -OutFile $wallpaperPath -ErrorAction Stop
+          
+          # تعيين الخلفية
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          using Microsoft.Win32;
+          namespace Wallpaper
+          {
+            public enum Style : int
+            {
+              Tile, Center, Stretch, Fill, Fit, Span
+            }
+            public class Setter {
+              public const int SetDesktopWallpaper = 20;
+              public const int UpdateIniFile = 0x01;
+              public const int SendWinIniChange = 0x02;
+              [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+              private static extern int SystemParametersInfo (int uAction, int uParam, string lpvParam, int fuWinIni);
+              public static void SetWallpaper ( string path, Style style ) {
+                SystemParametersInfo( SetDesktopWallpaper, 0, path, UpdateIniFile | SendWinIniChange );
+                RegistryKey key = Registry.CurrentUser.OpenSubKey("Control Panel\\Desktop", true);
+                switch( style )
+                {
+                  case Style.Tile:
+                    key.SetValue(@"WallpaperStyle", "0") ;
+                    key.SetValue(@"TileWallpaper", "1") ;
+                    break;
+                  case Style.Center:
+                    key.SetValue(@"WallpaperStyle", "0") ;
+                    key.SetValue(@"TileWallpaper", "0") ;
+                    break;
+                  case Style.Stretch:
+                    key.SetValue(@"WallpaperStyle", "2") ;
+                    key.SetValue(@"TileWallpaper", "0") ;
+                    break;
+                  case Style.Fill:
+                    key.SetValue(@"WallpaperStyle", "10") ;
+                    key.SetValue(@"TileWallpaper", "0") ;
+                    break;
+                  case Style.Fit:
+                    key.SetValue(@"WallpaperStyle", "6") ;
+                    key.SetValue(@"TileWallpaper", "0") ;
+                    break;
+                  case Style.Span:
+                    key.SetValue(@"WallpaperStyle", "22") ;
+                    key.SetValue(@"TileWallpaper", "0") ;
+                    break;
+                }
+                key.Close();
+              }
+            }
+          }
+"@
+          [Wallpaper.Setter]::SetWallpaper( $wallpaperPath, [Wallpaper.Style]::Fill )
+          Write-Host "✅ تم تعيين خلفية سطح المكتب المخصصة"
+        } catch {
+          Write-Host "⚠️ تعذر تحميل الخلفية المخصصة، استخدام الخلفية الافتراضية"
+        }
+        
+        # تحسين إعدادات الطاقة لمنع السبات
+        powercfg -change -monitor-timeout-ac 0
+        powercfg -change -standby-timeout-ac 0
+        powercfg -change -hibernate-timeout-ac 0
+        powercfg -h off
+        
+        Write-Host "✅ تم تخصيص تجربة سطح المكتب"
+
+    - name: Install and Configure Tailscale
+      run: |
+        # تثبيت Tailscale
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        Remove-Item $installerPath -Force
+        Start-Sleep -Seconds 10
+
+        # الاتصال بشبكة Tailscale
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=abdalli-premium-rdp --reset --advertise-exit-node
+        
+        # الحصول على IP
+        $tsIP = $null
+        $retries = 0
+        while (-not $tsIP -and $retries -lt 15) {
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          if (-not $tsIP) {
+            Start-Sleep -Seconds 2
+            $retries++
+          }
+        }
+        
+        if (-not $tsIP) {
+          # محاولة طريقة بديلة
+          $statusOutput = & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          if ($statusOutput -match '(\d+\.\d+\.\d+\.\d+)') {
+            $tsIP = $matches[1]
+          } else {
+            # استخدام IP افتراضي لشبكة Tailscale
+            $tsIP = "100.64.0.1"
+          }
+        }
+        
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+        Write-Host "✅ عنوان Tailscale IP: $tsIP"
+
+    - name: Final Verification and Optimization
+      run: |
+        # التحقق من أن المستخدم صالح للاستخدام
+        $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
+        if (-not $user) {
+          Write-Error "❌ المستخدم $env:RDP_USERNAME غير موجود!"
+          exit 1
+        }
+        
+        if (-not $user.Enabled) {
+          Enable-LocalUser -Name $env:RDP_USERNAME
+          Write-Host "✅ تم تمكين المستخدم: $env:RDP_USERNAME"
+        }
+        
+        # اختبار منفذ RDP
+        $rdpPortOpen = Test-NetConnection -ComputerName 127.0.0.1 -Port 3389 -InformationLevel Quiet
+        Write-Host "✅ منفذ RDP مفتوح: $rdpPortOpen"
+        
+        # تحسين أداء النظام
+        try {
+          Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart -ErrorAction SilentlyContinue
+          Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -ErrorAction SilentlyContinue
+        } catch {
+          Write-Host "⚠️ بعض الميزات الإضافية غير متوفرة في هذا الإصدار"
+        }
+        
+        Write-Host "✅ المستخدم $env:RDP_USERNAME جاهز لاتصالات RDP"
+
+    - name: Display Premium Connection Information
+      run: |
+        $border = "═"
+        $topLine = "╔" + ($border * 58) + "╗"
+        $bottomLine = "╚" + ($border * 58) + "╝"
+        $divider = "╠" + ($border * 58) + "╣"
+        
+        Write-Host ""
+        Write-Host $topLine
+        Write-Host "║                  🚀 اتصال RDP مميز جاهز                 ║"
+        Write-Host $divider
+        Write-Host "║   🌐 عنوان IP: $($env:TAILSCALE_IP.PadRight(37)) ║"
+        Write-Host "║   👤 اسم المستخدم: $($env:RDP_USERNAME.PadRight(35)) ║"
+        Write-Host "║   🔑 كلمة المرور: $($env:RDP_PASSWORD.PadRight(35)) ║"
+        Write-Host $divider
+        Write-Host "║   📛 بيانات اعتماد ثابتة - نفسها دائماً                ║"
+        Write-Host "║   🎨 خلفية مخصصة محسنة للتجربة                         ║"
+        Write-Host "║   🕒 إعادة تشغيل تلقائي يومي الساعة 4 صباحاً           ║"
+        Write-Host "║   ⚡ أداء معزز وجودة اتصال فائقة                       ║"
+        Write-Host $bottomLine
+        Write-Host ""
+        Write-Host "💡 احفظ هذه المعلومات لاستخدامها في الاتصالات المستقبلية!"
+        Write-Host ""
+
+    - name: Maintain Premium Connection
+      run: |
+        # إنشاء ملف معلومات على سطح المكتب
+        $desktopPath = [Environment]::GetFolderPath("Desktop")
+        $infoFile = "$desktopPath\اتصال_RDP_معلومات.txt"
+        $infoContent = @"
+معلومات اتصال RDP المميز
+=========================
+
+🌐 عنوان IP: $env:TAILSCALE_IP
+👤 اسم المستخدم: $env:RDP_USERNAME
+🔑 كلمة المرور: $env:RDP_PASSWORD
+
+⏰ مدة التشغيل: 3 أيام (إعادة تشغيل تلقائي)
+🎨 خلفية مخصصة محسنة
+⚡ أداء معزز وجودة اتصال فائقة
+
+💡 تم إنشاء هذا الاتصال عبر GitHub Actions
+"@
+        Set-Content -Path $infoFile -Value $infoContent -Encoding UTF8
+        
+        Write-Host "🚀 اتصال RDP المميز يعمل الآن!"
+        Write-Host "🌐 IP: $env:TAILSCALE_IP"
+        Write-Host "👤 المستخدم: $env:RDP_USERNAME"
+        Write-Host "🔑 كلمة المرور: $env:RDP_PASSWORD"
+        Write-Host ""
+        Write-Host "💻 تم تثبيت: Chrome, VSCode, Git, Node.js"
+        Write-Host "🎨 تم تعيين خلفية مخصصة لسطح المكتب"
+        Write-Host ""
+        Write-Host "⏰ اضغط على Ctrl+C في GitHub لإيقاف الجلسة"
+        
+        # حلقة للحفاظ على الاتصال مع تحديثات دورية
+        $counter = 0
+        while ($true) {
+          $counter++
+          if ($counter % 180 -eq 0) {  # كل 30 دقيقة
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP نشط - IP: $env:TAILSCALE_IP"
+            
+            # التحقق من أن Tailscale لا يزال نشطاً
+            $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "⚠️ إعادة توصيل Tailscale..."
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" up --reset
+            }
+          }
+          Start-Sleep -Seconds 10
+        }
